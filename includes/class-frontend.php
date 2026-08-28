@@ -40,24 +40,39 @@ class MAC_Frontend {
 
         $room_id = sanitize_text_field( $atts['id'] );
         
+        // --- NOVA VALIDAÇÃO DE SEGURANÇA ---
+        // Verifica se a classe de sinalização existe e valida o acesso
+        if ( class_exists( 'MAC_Signaling' ) ) {
+            $access_token = MAC_Signaling::verify_room_access( $room_id );
+
+            if ( ! $access_token ) {
+                // Retorna a interface de acesso negado e interrompe o carregamento da sala
+                return $this->get_access_denied_html();
+            }
+        } else {
+            return '<p>Erro: Módulo de segurança do Master Audio indisponível.</p>';
+        }
+        // -----------------------------------
+        
         // Lógica Multisite: Previne colisão de salas entre sub-sites
         $blog_id = is_multisite() ? get_current_blog_id() : '1';
         $isolated_room_id = 'site-' . $blog_id . '-' . $room_id;
 
-        // Carrega os assets apenas quando o shortcode for chamado
+        // Carrega os assets (CSS/JS) apenas quando o acesso for autorizado
         wp_enqueue_style( 'mac-room-style' );
         wp_enqueue_script( 'mac-socket-io' );
         wp_enqueue_script( 'mac-device-manager' );
         wp_enqueue_script( 'mac-webrtc-room' );
 
-        // Busca a URL do servidor Node.js configurada na rede
-        $signaling_server = get_site_option( 'mac_signaling_server_url', 'http://localhost:3000' );
+        // Busca a URL do servidor Node.js configurada na rede (ex: Render ou Hostoo)
+        $signaling_server = get_site_option( 'mac_signaling_server_url', 'https://master-audio-signaling.onrender.com' );
         
-        // Envia dados seguros do WordPress para o JavaScript
+        // Envia dados seguros do WordPress para o JavaScript, incluindo o token gerado
         wp_localize_script( 'mac-webrtc-room', 'macRoomData', array(
             'signalingServer' => $signaling_server,
             'roomId'          => $isolated_room_id,
-            'brandVoice'      => 'Aqui, a técnica encontra propósito.'
+            'brandVoice'      => 'Aqui, a técnica encontra propósito.',
+            'securityToken'   => $access_token
         ) );
 
         ob_start();
@@ -79,6 +94,18 @@ class MAC_Frontend {
             echo '<button class="mac-btn-primary" style="background-color: #FF5722; color: #FFFFFF; border: none; padding: 15px 35px; border-radius: 50px; font-weight: bold; font-size: 1rem; cursor: pointer; transition: background-color 0.3s ease;">Entrar na Sala</button>';
             echo '</div>';
         }
+    }
+
+    private function get_access_denied_html() {
+        ob_start();
+        ?>
+        <div class="mac-audio-room-denied" style="font-family: 'Noto Sans', sans-serif; background-color: #FAFAFA; color: #333333; padding: 60px 40px; border-radius: 8px; text-align: center; border-top: 4px solid #333333; box-shadow: 0 4px 12px rgba(0,0,0,0.05); max-width: 600px; margin: 40px auto;">
+            <h2 style="font-family: 'Belleza', sans-serif; color: #1A1A1A; font-size: 2rem; margin-bottom: 15px;">Estúdio Virtual Restrito</h2>
+            <p style="font-size: 1.1rem; color: #666666; margin-bottom: 25px;">Você precisa estar autenticado para acessar esta sala de colaboração.</p>
+            <a href="<?php echo esc_url( wp_login_url( get_permalink() ) ); ?>" class="mac-btn-primary" style="display: inline-block; background-color: #FF5722; color: #FFFFFF; text-decoration: none; padding: 12px 30px; border-radius: 50px; font-weight: bold; font-size: 1rem; transition: background-color 0.3s ease;">Fazer Login</a>
+        </div>
+        <?php
+        return ob_get_clean();
     }
 }
 
