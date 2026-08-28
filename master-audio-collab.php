@@ -49,5 +49,4 @@ function mac_setup_site() {
 
 // Os arquivos de backend serão incluídos aqui na sequência
 require_once MAC_PLUGIN_DIR . 'includes/class-frontend.php';
-
-// require_once MAC_PLUGIN_DIR . 'includes/class-signaling.php';
+require_once MAC_PLUGIN_DIR . 'includes/class-signaling.php';
