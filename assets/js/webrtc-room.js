@@ -2,45 +2,78 @@
  * Master Audio Collab - Motor WebRTC e Sinalização
  */
 document.addEventListener('DOMContentLoaded', () => {
-    // Verifica se os dados do WordPress foram injetados corretamente
     if (typeof macRoomData === 'undefined' || typeof io === 'undefined') {
         console.error('Master Audio Collab: Dados de inicialização ou Socket.io ausentes.');
         return;
     }
 
-    const socket = io(macRoomData.signalingServer);
+    // 1. Tratamento de Cold Start (Render)
+    // Aumentamos o timeout nativo para dar tempo da máquina virtual despertar
+    const socket = io(macRoomData.signalingServer, {
+        reconnectionDelayMax: 10000,
+        timeout: 45000 
+    });
+    
     const roomId = macRoomData.roomId;
-    
-    // Armazena as conexões P2P com outros músicos
     const peers = {}; 
-    
-    // O stream de áudio local capturado pelo device-manager.js
     let localStream = null;
+    let isServerAwake = false;
     
-    // Elementos DOM 
     const participantsContainer = document.getElementById('mac-participants-container');
     const joinButton = document.getElementById('mac-btn-join');
+    const localStatus = document.querySelector('.local-participant .mac-status-indicator');
 
-    // Configuração de servidores STUN para descobrir IPs públicos na rede P2P
+    // Monitor de latência de inicialização
+    const wakeUpMonitor = setTimeout(() => {
+        if (!isServerAwake && localStatus) {
+            localStatus.textContent = 'Despertando o estúdio na nuvem (pode levar 30s)...';
+            localStatus.style.color = '#FF5722';
+            
+            if (joinButton) {
+                joinButton.textContent = 'Aguardando Servidor...';
+                joinButton.style.opacity = '0.7';
+            }
+        }
+    }, 3000);
+
+    socket.on('connect', () => {
+        isServerAwake = true;
+        clearTimeout(wakeUpMonitor);
+        if (localStatus && !localStream) {
+            localStatus.textContent = 'Servidor online. Aguardando seu áudio.';
+            localStatus.style.color = '#666666';
+        }
+        if (joinButton && !joinButton.disabled) {
+            joinButton.textContent = 'Conectar à Sala';
+            joinButton.style.opacity = '1';
+        }
+    });
+
+    // 2. Configuração WebRTC (STUN + TURN de Fallback)
     const iceServers = {
         iceServers: [
+            // STUN: Descobre os IPs públicos (Falha em NAT Estrito)
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
+            { urls: 'stun:stun1.l.google.com:19302' },
+            
+            // TURN: Retransmite o áudio via nuvem caso o P2P seja bloqueado por firewalls
+            // Substitua estas credenciais por um serviço real (ex: Metered, Twilio ou sua instância Coturn na AWS)
+            {
+                urls: 'turn:sua-url-turn.com:3478',
+                username: 'SEU_USUARIO_TURN',
+                credential: 'SUA_SENHA_TURN'
+            }
         ]
     };
 
-    // 1. Escuta o hardware local (disparado pelo device-manager.js)
     window.addEventListener('mac-local-stream-ready', (e) => {
         localStream = e.detail.stream;
         
-        // Atualiza o card local na interface
-        const localStatus = document.querySelector('.local-participant .mac-status-indicator');
         if (localStatus) {
             localStatus.textContent = 'Áudio pronto para transmitir';
             localStatus.style.color = '#4CAF50';
         }
         
-        // Se já houver conexões ativas, atualiza as trilhas de áudio
         for (let peerId in peers) {
             const peerConnection = peers[peerId];
             const senders = peerConnection.getSenders();
@@ -52,43 +85,39 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // 2. Ação de Conectar à Sala
     if (joinButton) {
         joinButton.addEventListener('click', () => {
             if (!localStream) {
                 alert('Selecione e permita o acesso à sua interface de áudio antes de entrar.');
                 return;
             }
+            if (!isServerAwake) {
+                alert('Aguarde o servidor de sinalização despertar antes de conectar.');
+                return;
+            }
             
-            // Feedback visual alinhado à marca (Laranja)
             joinButton.textContent = 'Conectado';
             joinButton.style.backgroundColor = '#4CAF50'; 
             joinButton.disabled = true;
 
-            // Pede ao servidor Node.js para entrar na sala isolada
             socket.emit('join-room', roomId, socket.id);
         });
     }
 
-    // 3. Orquestração WebRTC (Sinalização)
-
-    // Quando um NOVO músico entra na sala
+    // Orquestração P2P
     socket.on('user-connected', async (userId) => {
         const peerConnection = createPeerConnection(userId);
         peers[userId] = peerConnection;
 
-        // Adiciona nosso áudio para o novo usuário
         localStream.getTracks().forEach(track => {
             peerConnection.addTrack(track, localStream);
         });
 
-        // Cria a oferta de conexão P2P
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
         socket.emit('offer', offer, userId);
     });
 
-    // Quando recebemos uma OFERTA de um músico que já estava lá
     socket.on('offer', async (offer, senderId) => {
         const peerConnection = createPeerConnection(senderId);
         peers[senderId] = peerConnection;
@@ -99,13 +128,11 @@ document.addEventListener('DOMContentLoaded', () => {
             peerConnection.addTrack(track, localStream);
         });
 
-        // Responde à oferta
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', answer, senderId);
     });
 
-    // Quando recebemos a RESPOSTA 
     socket.on('answer', async (answer, senderId) => {
         const peerConnection = peers[senderId];
         if (peerConnection) {
@@ -113,7 +140,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Troca de rotas de rede (ICE)
     socket.on('ice-candidate', async (candidate, senderId) => {
         const peerConnection = peers[senderId];
         if (peerConnection) {
@@ -121,7 +147,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Quando um músico sai
     socket.on('user-disconnected', (userId) => {
         if (peers[userId]) {
             peers[userId].close();
@@ -134,7 +159,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // 4. Função Auxiliar: Criar Conexão e UI
     function createPeerConnection(userId) {
         const peerConnection = new RTCPeerConnection(iceServers);
 
@@ -152,7 +176,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return peerConnection;
     }
 
-    // 5. Renderização do Músico Remoto no DOM
     function addRemoteParticipant(userId, stream) {
         if (document.getElementById(`mac-peer-${userId}`)) return;
 
