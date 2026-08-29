@@ -23,9 +23,15 @@ class MACDeviceManager {
         try {
             // Um gatilho inicial pedindo permissão de áudio genérica é necessário
             // para que o navegador revele os nomes reais das placas de som na lista
-            await navigator.mediaDevices.getUserMedia({ audio: true });
-            
+            const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
             await this.loadDevices();
+
+            // Esse stream inicial só existia para liberar os labels dos dispositivos.
+            // Paramos as tracks agora que enumerateDevices() já retornou, para não
+            // deixar o microfone "aberto" (e o indicador do navegador aceso) à toa.
+            permissionStream.getTracks().forEach(track => track.stop());
+
             await this.startStream();
         } catch (error) {
             console.error('Erro ao acessar o microfone:', error);
