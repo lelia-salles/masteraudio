@@ -70,7 +70,13 @@ class MACDeviceManager {
                 deviceId: this.selectedDeviceId !== 'default' ? { exact: this.selectedDeviceId } : undefined,
                 echoCancellation: !this.musicModeEnabled,
                 noiseSuppression: !this.musicModeEnabled,
-                autoGainControl: !this.musicModeEnabled
+                autoGainControl: !this.musicModeEnabled,
+                // Pede ao navegador o menor buffer de captura possível (em segundos).
+                // Suporte varia por navegador/hardware (funciona bem em Chrome/Edge
+                // com interfaces de áudio dedicadas); onde é ignorado, não há efeito
+                // colateral negativo. Só faz sentido no Modo Música, onde já abrimos
+                // mão dos filtros de voz em troca de fidelidade/latência.
+                latency: this.musicModeEnabled ? { ideal: 0 } : undefined
             }
         };
 
