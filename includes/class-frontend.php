@@ -66,13 +66,32 @@ class MAC_Frontend {
 
         // Busca a URL do servidor Node.js configurada na rede (ex: Render ou Hostoo)
         $signaling_server = get_site_option( 'mac_signaling_server_url', 'https://master-audio-signaling.onrender.com' );
-        
+
+        // Credenciais TURN: NUNCA hardcoded no JS. Devem ser definidas como
+        // constantes no wp-config.php (fora do controle de versão), por exemplo:
+        //
+        //   define( 'MAC_TURN_URL', 'turn:seu-turn.exemplo.com:3478' );
+        //   define( 'MAC_TURN_USERNAME', 'usuario' );
+        //   define( 'MAC_TURN_CREDENTIAL', 'senha' );
+        //
+        // Sem essas constantes, o plugin funciona apenas com STUN — o que falha
+        // silenciosamente para participantes atrás de NAT restritivo/firewall
+        // corporativo. Para um coturn com static-auth-secret, o ideal é gerar
+        // credenciais de curta duração via HMAC em vez de usuário/senha fixos;
+        // este é o ponto do código para plugar essa lógica no futuro.
+        $turn_url        = defined( 'MAC_TURN_URL' ) ? MAC_TURN_URL : '';
+        $turn_username   = defined( 'MAC_TURN_USERNAME' ) ? MAC_TURN_USERNAME : '';
+        $turn_credential = defined( 'MAC_TURN_CREDENTIAL' ) ? MAC_TURN_CREDENTIAL : '';
+
         // Envia dados seguros do WordPress para o JavaScript, incluindo o token gerado
         wp_localize_script( 'mac-webrtc-room', 'macRoomData', array(
             'signalingServer' => $signaling_server,
             'roomId'          => $isolated_room_id,
             'brandVoice'      => 'Aqui, a técnica encontra propósito.',
-            'securityToken'   => $access_token
+            'securityToken'   => $access_token,
+            'turnUrl'         => $turn_url,
+            'turnUsername'    => $turn_username,
+            'turnCredential'  => $turn_credential,
         ) );
 
         ob_start();
