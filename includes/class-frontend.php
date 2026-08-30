@@ -39,11 +39,20 @@ class MAC_Frontend {
         ), $atts, 'master_audio_room' );
 
         $room_id = sanitize_text_field( $atts['id'] );
-        
-        // --- NOVA VALIDAÇÃO DE SEGURANÇA ---
-        // Verifica se a classe de sinalização existe e valida o acesso
+
+        // Lógica Multisite: Previne colisão de salas entre sub-sites.
+        // Calculado ANTES da validação de acesso: o token precisa ser
+        // assinado para este ID já isolado, não para o room_id "cru" do
+        // shortcode (que poderia se repetir entre sub-sites diferentes).
+        $blog_id = is_multisite() ? get_current_blog_id() : '1';
+        $isolated_room_id = 'site-' . $blog_id . '-' . $room_id;
+
+        // --- VALIDAÇÃO DE SEGURANÇA ---
+        // Verifica se a classe de sinalização existe e valida o acesso.
+        // O token retornado é assinado (HMAC) e verificado pelo próprio
+        // servidor Node no join-room — ver includes/class-signaling.php.
         if ( class_exists( 'MAC_Signaling' ) ) {
-            $access_token = MAC_Signaling::verify_room_access( $room_id );
+            $access_token = MAC_Signaling::verify_room_access( $isolated_room_id );
 
             if ( ! $access_token ) {
                 // Retorna a interface de acesso negado e interrompe o carregamento da sala
@@ -53,10 +62,6 @@ class MAC_Frontend {
             return '<p>Erro: Módulo de segurança do Master Audio indisponível.</p>';
         }
         // -----------------------------------
-        
-        // Lógica Multisite: Previne colisão de salas entre sub-sites
-        $blog_id = is_multisite() ? get_current_blog_id() : '1';
-        $isolated_room_id = 'site-' . $blog_id . '-' . $room_id;
 
         // Carrega os assets (CSS/JS) apenas quando o acesso for autorizado
         wp_enqueue_style( 'mac-room-style' );
