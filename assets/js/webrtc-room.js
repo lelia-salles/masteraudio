@@ -8,7 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 1. Tratamento de Cold Start (Render)
-    
+    // Aumentamos o timeout nativo para dar tempo da máquina virtual despertar
     const socket = io(macRoomData.signalingServer, {
         reconnectionDelayMax: 10000,
         timeout: 45000 
@@ -48,7 +48,8 @@ document.addEventListener('DOMContentLoaded', () => {
             joinButton.style.opacity = '1';
         }
 
-        // Teste de qualidade antes do usuário clicar em "Conectar à Sala".
+        // Roda o teste de qualidade de rede assim que o servidor responde,
+        // bem antes do usuário clicar em "Conectar à Sala".
         runNetworkCheck();
     });
 
@@ -59,7 +60,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Sem TURN real configurado, participantes atrás de NAT restritivo ou
     // firewall corporativo falham silenciosamente ao conectar — o STUN sozinho
     // não resolve esses casos.
-
     const iceServers = {
         iceServers: [
             // STUN: Descobre os IPs públicos (Falha em NAT Estrito)
@@ -83,8 +83,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 3. Baixa latência: ajuste fino do SDP para áudio ao vivo (jam session)
-    // Em conexões instáveis, volte para 20ms editando LOW_LATENCY_PTIME_MS abaixo.
-
+    // Reduz o "ptime" (tamanho do pacote de áudio Opus) de 20ms (padrão) para
+    // 10ms, diminuindo a latência de empacotamento. Custo: mais pacotes por
+    // segundo (mais overhead de rede). Em conexões instáveis, considere voltar
+    // para 20ms editando LOW_LATENCY_PTIME_MS abaixo.
     const LOW_LATENCY_PTIME_MS = 10;
 
     function reduceOpusLatency(sdp, ptimeMs) {
@@ -129,9 +131,26 @@ document.addEventListener('DOMContentLoaded', () => {
             joinButton.style.backgroundColor = '#4CAF50'; 
             joinButton.disabled = true;
 
-            socket.emit('join-room', roomId, socket.id);
+            // O securityToken é assinado pelo WordPress (HMAC) para esta sala
+            // específica e verificado pelo servidor de sinalização antes de
+            // aceitar a entrada — ver MAC_Signaling::verify_room_access() e
+            // verifyRoomToken() no server.js.
+            socket.emit('join-room', roomId, socket.id, macRoomData.securityToken);
         });
     }
+
+    // O servidor recusa o join-room se o token estiver ausente, inválido,
+    // emitido para outra sala, ou expirado (validade de 1h desde o carregamento
+    // da página). Nesse caso, reabilita o botão para o usuário tentar de novo
+    // após recarregar a página (o que gera um token novo e válido).
+    socket.on('join-error', (data) => {
+        alert('Não foi possível entrar na sala: ' + (data && data.message ? data.message : 'acesso negado.'));
+        if (joinButton) {
+            joinButton.textContent = 'Conectar à Sala';
+            joinButton.style.backgroundColor = '';
+            joinButton.disabled = false;
+        }
+    });
 
     // 5. Teste de qualidade de rede (pré-jam)
     // Roda automaticamente ao conectar e pode ser refeito a qualquer momento
