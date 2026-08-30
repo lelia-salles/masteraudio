@@ -41,19 +41,57 @@ class MAC_Signaling {
     }
 
     /**
-     * Verifica se o usuário atual tem permissão para acessar a sala.
-     * Retorna um token (nonce) se autorizado, ou false se negado.
+     * Gera um token assinado que autoriza o usuário atual a entrar em uma
+     * sala específica no servidor de sinalização Node.js.
+     *
+     * O servidor Node NÃO tem acesso ao banco de dados do WordPress, então em
+     * vez de wp_create_nonce() (que só pode ser verificado dentro do próprio
+     * WordPress via wp_verify_nonce()), assinamos um payload simples com um
+     * segredo compartilhado (constante MAC_SIGNALING_SECRET). O servidor Node
+     * guarda o mesmo segredo em uma variável de ambiente e recalcula a
+     * assinatura — sem precisar bater no banco a cada conexão.
+     *
+     * Formato do token: "{payload_base64url}.{assinatura_hmac_sha256_hex}"
+     *
+     * IMPORTANTE: $isolated_room_id deve ser o ID JÁ isolado por sub-site
+     * (ex: "site-2-sala-geral"), não o room_id "cru" do shortcode — caso
+     * contrário um token emitido em um sub-site poderia ser reaproveitado em
+     * outro que use o mesmo nome de sala.
+     *
+     * @param string $isolated_room_id ID da sala isolado por site.
+     * @return string|false Token assinado, ou false se o acesso for negado.
      */
-    public static function verify_room_access( $room_id ) {
-        // Exemplo de regra: Apenas usuários logados podem acessar as salas
+    public static function verify_room_access( $isolated_room_id ) {
+        // Regra de autorização: apenas usuários logados podem acessar as salas.
         if ( ! is_user_logged_in() ) {
             return false;
         }
 
-        // Gera um token de segurança único para a sessão do usuário nesta sala específica
-        $token = wp_create_nonce( 'mac_access_' . $room_id . '_' . get_current_user_id() );
-        
-        return $token;
+        if ( ! defined( 'MAC_SIGNALING_SECRET' ) || empty( MAC_SIGNALING_SECRET ) ) {
+            // Sem segredo compartilhado configurado, o servidor de sinalização
+            // não tem como validar o token de forma independente. Falhamos de
+            // forma SEGURA (negando o acesso) em vez de deixar a sala aberta
+            // para qualquer um que descubra o room_id no HTML da página.
+            if ( function_exists( 'error_log' ) ) {
+                error_log( 'Master Audio Collab: MAC_SIGNALING_SECRET não definido no wp-config.php. Acesso às salas negado até ser configurado.' );
+            }
+            return false;
+        }
+
+        $payload = array(
+            'room' => $isolated_room_id,
+            'user' => get_current_user_id(),
+            'exp'  => time() + HOUR_IN_SECONDS,
+        );
+
+        $payload_b64 = self::base64url_encode( wp_json_encode( $payload ) );
+        $signature   = hash_hmac( 'sha256', $payload_b64, MAC_SIGNALING_SECRET );
+
+        return $payload_b64 . '.' . $signature;
+    }
+
+    private static function base64url_encode( $data ) {
+        return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' );
     }
 }
 
