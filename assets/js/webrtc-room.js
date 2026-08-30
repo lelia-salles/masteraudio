@@ -8,7 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 1. Tratamento de Cold Start (Render)
-    // Aumentamos o timeout nativo para dar tempo da máquina virtual despertar
+    
     const socket = io(macRoomData.signalingServer, {
         reconnectionDelayMax: 10000,
         timeout: 45000 
@@ -47,6 +47,9 @@ document.addEventListener('DOMContentLoaded', () => {
             joinButton.textContent = 'Conectar à Sala';
             joinButton.style.opacity = '1';
         }
+
+        // Teste de qualidade antes do usuário clicar em "Conectar à Sala".
+        runNetworkCheck();
     });
 
     // 2. Configuração WebRTC (STUN + TURN de Fallback)
@@ -56,6 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Sem TURN real configurado, participantes atrás de NAT restritivo ou
     // firewall corporativo falham silenciosamente ao conectar — o STUN sozinho
     // não resolve esses casos.
+
     const iceServers = {
         iceServers: [
             // STUN: Descobre os IPs públicos (Falha em NAT Estrito)
@@ -79,10 +83,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 3. Baixa latência: ajuste fino do SDP para áudio ao vivo (jam session)
-    // Reduz o "ptime" (tamanho do pacote de áudio Opus) de 20ms (padrão) para
-    // 10ms, diminuindo a latência de empacotamento. Custo: mais pacotes por
-    // segundo (mais overhead de rede). Em conexões instáveis, considere voltar
-    // para 20ms editando LOW_LATENCY_PTIME_MS abaixo.
+    // Em conexões instáveis, volte para 20ms editando LOW_LATENCY_PTIME_MS abaixo.
+
     const LOW_LATENCY_PTIME_MS = 10;
 
     function reduceOpusLatency(sdp, ptimeMs) {
@@ -129,6 +131,127 @@ document.addEventListener('DOMContentLoaded', () => {
 
             socket.emit('join-room', roomId, socket.id);
         });
+    }
+
+    // 5. Teste de qualidade de rede (pré-jam)
+    // Roda automaticamente ao conectar e pode ser refeito a qualquer momento
+    // via botão "Testar novamente". Mede duas coisas ANTES de entrar na sala:
+    //
+    //   a) RTT até o servidor de sinalização (aproxima a distância/latência de
+    //      rede geral do usuário — NÃO é o RTT real P2P com cada colega, que
+    //      só existe depois que a conexão é estabelecida e depende da rota
+    //      específica entre os dois clientes).
+    //   b) Quais tipos de candidato ICE a rede consegue gerar (host/srflx/relay),
+    //      o que ajuda a detectar firewalls corporativos ou NAT muito restritivo
+    //      antes que isso vire um problema no meio do ensaio.
+    const retestButton = document.getElementById('mac-btn-retest-network');
+    if (retestButton) {
+        retestButton.addEventListener('click', () => runNetworkCheck());
+    }
+
+    async function runNetworkCheck() {
+        updateNetworkCheckUI('checking', 'Testando sua conexão...');
+        if (retestButton) retestButton.disabled = true;
+
+        try {
+            const rttSamples = [];
+            for (let i = 0; i < 5; i++) {
+                const rtt = await pingOnce();
+                if (rtt !== null) rttSamples.push(rtt);
+                await new Promise((resolve) => setTimeout(resolve, 150));
+            }
+
+            const candidateTypes = await gatherIceCandidateTypes();
+
+            if (rttSamples.length === 0) {
+                updateNetworkCheckUI('bad', '🔴 Não foi possível medir a latência até o servidor. Verifique sua conexão.');
+                return;
+            }
+
+            const avgRtt = rttSamples.reduce((a, b) => a + b, 0) / rttSamples.length;
+            const jitter = Math.max(...rttSamples) - Math.min(...rttSamples);
+
+            renderNetworkVerdict(avgRtt, jitter, candidateTypes);
+        } finally {
+            if (retestButton) retestButton.disabled = false;
+        }
+    }
+
+    function pingOnce() {
+        return new Promise((resolve) => {
+            const start = performance.now();
+            const timeout = setTimeout(() => resolve(null), 3000);
+            socket.emit('latency-ping', { t: start }, () => {
+                clearTimeout(timeout);
+                resolve(performance.now() - start);
+            });
+        });
+    }
+
+    function gatherIceCandidateTypes() {
+        return new Promise((resolve) => {
+            const pc = new RTCPeerConnection(iceServers);
+            const types = new Set();
+            const timeout = setTimeout(finish, 4000);
+
+            function finish() {
+                clearTimeout(timeout);
+                pc.close();
+                resolve(types);
+            }
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate && event.candidate.candidate) {
+                    const match = event.candidate.candidate.match(/ typ (\w+)/);
+                    if (match) types.add(match[1]);
+                } else if (!event.candidate) {
+                    // event.candidate === null sinaliza fim do gathering
+                    finish();
+                }
+            };
+
+            pc.createDataChannel('network-check');
+            pc.createOffer()
+                .then((offer) => pc.setLocalDescription(offer))
+                .catch(finish);
+        });
+    }
+
+    function renderNetworkVerdict(avgRtt, jitter, candidateTypes) {
+        const hasHost = candidateTypes.has('host');
+        const hasSrflx = candidateTypes.has('srflx');
+        const hasRelay = candidateTypes.has('relay');
+
+        let level;
+        let message;
+
+        if (!hasHost && !hasSrflx && !hasRelay) {
+            level = 'bad';
+            message = '🔴 Não foi possível coletar rotas de rede (UDP pode estar bloqueado no seu firewall/rede). O áudio pode falhar ou ficar instável.';
+        } else if (avgRtt < 40 && jitter < 30) {
+            level = 'good';
+            message = `🟢 Boa conexão para tocar em tempo real (~${Math.round(avgRtt)}ms até o servidor, variação ${Math.round(jitter)}ms).`;
+        } else if (avgRtt < 100 && jitter < 60) {
+            level = 'ok';
+            message = `🟡 Conexão razoável — pode haver leve atraso perceptível (~${Math.round(avgRtt)}ms, variação ${Math.round(jitter)}ms).`;
+        } else {
+            level = 'bad';
+            message = `🔴 Conexão distante ou instável (~${Math.round(avgRtt)}ms, variação ${Math.round(jitter)}ms) — provável atraso perceptível ao tocar junto.`;
+        }
+
+        if (hasRelay && !hasSrflx && !hasHost) {
+            message += ' Sua rede só conseguiu candidatos via relay (TURN), o que tende a somar latência extra.';
+        }
+
+        updateNetworkCheckUI(level, message);
+    }
+
+    function updateNetworkCheckUI(level, message) {
+        const el = document.getElementById('mac-network-check-status');
+        if (!el) return;
+        el.textContent = message;
+        const colors = { checking: '#666666', good: '#4CAF50', ok: '#B8860B', bad: '#FF5722' };
+        el.style.color = colors[level] || '#666666';
     }
 
     // Orquestração P2P
