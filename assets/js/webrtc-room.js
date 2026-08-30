@@ -50,21 +50,48 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // 2. Configuração WebRTC (STUN + TURN de Fallback)
+    // As credenciais TURN nunca ficam hardcoded no JS: elas chegam via
+    // wp_localize_script (macRoomData), configuradas no wp-config.php do site
+    // (constantes MAC_TURN_URL / MAC_TURN_USERNAME / MAC_TURN_CREDENTIAL).
+    // Sem TURN real configurado, participantes atrás de NAT restritivo ou
+    // firewall corporativo falham silenciosamente ao conectar — o STUN sozinho
+    // não resolve esses casos.
     const iceServers = {
         iceServers: [
             // STUN: Descobre os IPs públicos (Falha em NAT Estrito)
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
-            
-            // TURN: Retransmite o áudio via nuvem caso o P2P seja bloqueado por firewalls
-            // Substitua estas credenciais por um serviço real (ex: Metered, Twilio ou sua instância Coturn na AWS)
-            {
-                urls: 'turn:sua-url-turn.com:3478',
-                username: 'SEU_USUARIO_TURN',
-                credential: 'SUA_SENHA_TURN'
-            }
         ]
     };
+
+    if (macRoomData.turnUrl && macRoomData.turnUsername && macRoomData.turnCredential) {
+        iceServers.iceServers.push({
+            urls: macRoomData.turnUrl,
+            username: macRoomData.turnUsername,
+            credential: macRoomData.turnCredential
+        });
+    } else {
+        console.warn(
+            'Master Audio Collab: TURN não configurado. Conexões atrás de NAT ' +
+            'restritivo ou firewall corporativo podem falhar silenciosamente. ' +
+            'Defina MAC_TURN_URL, MAC_TURN_USERNAME e MAC_TURN_CREDENTIAL no wp-config.php.'
+        );
+    }
+
+    // 3. Baixa latência: ajuste fino do SDP para áudio ao vivo (jam session)
+    // Reduz o "ptime" (tamanho do pacote de áudio Opus) de 20ms (padrão) para
+    // 10ms, diminuindo a latência de empacotamento. Custo: mais pacotes por
+    // segundo (mais overhead de rede). Em conexões instáveis, considere voltar
+    // para 20ms editando LOW_LATENCY_PTIME_MS abaixo.
+    const LOW_LATENCY_PTIME_MS = 10;
+
+    function reduceOpusLatency(sdp, ptimeMs) {
+        if (/a=ptime:\d+/.test(sdp)) {
+            return sdp.replace(/a=ptime:\d+/g, 'a=ptime:' + ptimeMs);
+        }
+        // Se não existir linha a=ptime, insere logo após o m=audio
+        return sdp.replace(/(m=audio[^\r\n]*\r?\n)/, '$1a=ptime:' + ptimeMs + '\r\n');
+    }
 
     window.addEventListener('mac-local-stream-ready', (e) => {
         localStream = e.detail.stream;
@@ -114,6 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         const offer = await peerConnection.createOffer();
+        offer.sdp = reduceOpusLatency(offer.sdp, LOW_LATENCY_PTIME_MS);
         await peerConnection.setLocalDescription(offer);
         socket.emit('offer', offer, userId);
     });
@@ -129,6 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         const answer = await peerConnection.createAnswer();
+        answer.sdp = reduceOpusLatency(answer.sdp, LOW_LATENCY_PTIME_MS);
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', answer, senderId);
     });
@@ -171,9 +200,78 @@ document.addEventListener('DOMContentLoaded', () => {
         peerConnection.ontrack = (event) => {
             const remoteStream = event.streams[0];
             addRemoteParticipant(userId, remoteStream);
+
+            // Pede ao navegador para minimizar o jitter buffer de reprodução.
+            // Suporte: Chrome/Edge (Chromium). É uma troca consciente: reduz a
+            // resiliência a instabilidade de rede em favor da menor latência
+            // possível — o que é exatamente o que uma jam session precisa.
+            if ('playoutDelayHint' in event.receiver) {
+                try {
+                    event.receiver.playoutDelayHint = 0;
+                } catch (err) {
+                    // Alguns navegadores expõem a propriedade mas a rejeitam; ignora.
+                }
+            }
         };
 
+        monitorConnectionQuality(peerConnection, userId);
+
         return peerConnection;
+    }
+
+    // 4. Monitor de qualidade: detecta relay (TURN) e mede RTT periodicamente.
+    // Conexões via relay quase sempre somam latência extra em relação a uma
+    // conexão direta (host/srflx) — vale avisar visualmente quem está "atrás"
+    // de um relay, já que isso pode explicar atraso percebido na jam.
+    function monitorConnectionQuality(peerConnection, userId) {
+        const interval = setInterval(async () => {
+            if (peerConnection.connectionState === 'closed' || peerConnection.connectionState === 'failed') {
+                clearInterval(interval);
+                return;
+            }
+
+            try {
+                const stats = await peerConnection.getStats();
+                stats.forEach((report) => {
+                    if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+                        const localCandidate = stats.get(report.localCandidateId);
+                        const remoteCandidate = stats.get(report.remoteCandidateId);
+                        const usingRelay = (localCandidate && localCandidate.candidateType === 'relay') ||
+                                            (remoteCandidate && remoteCandidate.candidateType === 'relay');
+                        const rttMs = typeof report.currentRoundTripTime === 'number'
+                            ? Math.round(report.currentRoundTripTime * 1000)
+                            : null;
+
+                        updatePeerQualityBadge(userId, usingRelay, rttMs);
+                    }
+                });
+            } catch (err) {
+                // getStats() pode falhar momentaneamente durante renegociação; ignora.
+            }
+        }, 3000);
+    }
+
+    function updatePeerQualityBadge(userId, usingRelay, rttMs) {
+        const card = document.getElementById(`mac-peer-${userId}`);
+        if (!card) return;
+
+        let badge = card.querySelector('.mac-quality-badge');
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.className = 'mac-quality-badge';
+            badge.style.fontSize = '0.75rem';
+            badge.style.marginTop = '4px';
+            card.appendChild(badge);
+        }
+
+        const rttLabel = rttMs !== null ? `${rttMs}ms` : '—';
+        if (usingRelay) {
+            badge.textContent = `⚠️ Via relay (TURN) · RTT ${rttLabel}`;
+            badge.style.color = '#FF5722';
+        } else {
+            badge.textContent = `Conexão direta · RTT ${rttLabel}`;
+            badge.style.color = '#4CAF50';
+        }
     }
 
     function addRemoteParticipant(userId, stream) {
